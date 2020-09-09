@@ -22,7 +22,7 @@ func main() {
 	go ajsaleParser()
 	go ajParser()
 
-	bot, err := tgbotapi.NewBotAPI("TOKEN")
+	bot, err := tgbotapi.NewBotAPI("")
 	if err != nil {
 		log.Panic(err)
 	}
@@ -87,6 +87,8 @@ func main() {
 					msg.ParseMode = "markdown"
 					sendedMsg, err := bot.Send(msg)
 					time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sendedMsg.Chat.ID, sendedMsg.MessageID}) })
+					time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sendedMsg.Chat.ID, update.Message.MessageID}) })
+
 				}
 			}
 
@@ -98,20 +100,19 @@ func main() {
 				}
 				defer rows.Close()
 
-				var categories = ""
-				var command = ""
+				var categories, command string
 				for rows.Next() {
 					err := rows.Scan(&command)
 					if err != nil {
 						log.Fatal(err)
 					}
 
-					//category = strings.ReplaceAll(category, " ", "`")
 					categories += "/" + command + "\n"
 				}
 				msg.Text = categories
-				sendedMsg, err := bot.Send(msg)
-				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sendedMsg.Chat.ID, sendedMsg.MessageID}) })
+				sentMsg, err := bot.Send(msg)
+				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sentMsg.Chat.ID, sentMsg.MessageID}) })
+				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sentMsg.Chat.ID, update.Message.MessageID}) })
 			case "ajsale":
 				rows, err := database.Query(`SELECT title, price, description FROM prices WHERE site="ajsale.ru" ORDER BY category COLLATE NOCASE ASC`)
 				if err != nil {
@@ -119,10 +120,7 @@ func main() {
 				}
 				defer rows.Close()
 
-				var items = ""
-				var title = ""
-				var price = ""
-				var description = ""
+				var items, title, price, description string
 				for rows.Next() {
 					err := rows.Scan(&title, &price, &description)
 					if err != nil {
@@ -136,30 +134,26 @@ func main() {
 				msg.ParseMode = "markdown"
 				sendedMsg, err := bot.Send(msg)
 				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sendedMsg.Chat.ID, sendedMsg.MessageID}) })
+				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sendedMsg.Chat.ID, update.Message.MessageID}) })
 			case "changes":
-				rows, err := database.Query(`SELECT title, price, old_price, updated FROM updates WHERE site="aj.ru" ORDER BY id LIMIT 10`)
+				rows, err := database.Query(`SELECT title, price, old_price, updated FROM updates WHERE site="aj.ru" AND DATE(updated) >= DATE('now', 'weekday 0', '-7 days') ORDER BY id DESC LIMIT 30`)
 				if err != nil {
 					log.Fatal(err)
 				}
 				defer rows.Close()
 
-				var items = ""
-				var title = ""
-				var price = ""
-				var old_price = ""
-				var updated = ""
+				var items, title, price, old_price, updated string
 				for rows.Next() {
-					err := rows.Scan(&title, &price, &old_price, &updated)
-					if err != nil {
-						log.Fatal(err)
-					}
-
-					items += title + " – было *" + price + "* руб. стало *" + old_price + "* руб. (" + updated + ")\n"
+					rows.Scan(&title, &price, &old_price, &updated)
+					updated, _ := time.Parse(time.RFC3339, updated)
+					location, _ := time.LoadLocation("Europe/Moscow")
+					items += title + " было *" + old_price + "* руб. стало *" + price + "* руб. (" + updated.In(location).Format("02.01.2006 15:04:05") + ")\n"
 				}
 				msg.Text = items
 				msg.ParseMode = "markdown"
-				sendedMsg, err := bot.Send(msg)
-				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sendedMsg.Chat.ID, sendedMsg.MessageID}) })
+				sentMsg, _ := bot.Send(msg)
+				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sentMsg.Chat.ID, sentMsg.MessageID}) })
+				time.AfterFunc(60*time.Second, func() { bot.DeleteMessage(tgbotapi.DeleteMessageConfig{sentMsg.Chat.ID, update.Message.MessageID}) })
 			}
 
 		}
@@ -176,7 +170,7 @@ func ajParser() {
 
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
-	ticker := time.NewTicker(60 * 60 * time.Second)
+	ticker := time.NewTicker(5 * 60 * time.Second)
 	for ; true; <-ticker.C {
 
 		datetime := time.Now().Format(time.RFC3339)
@@ -315,21 +309,21 @@ func ajsaleParser() {
 	statement, _ = database.Prepare("CREATE TABLE IF NOT EXISTS updates (id INTEGER PRIMARY KEY, title TEXT, category TEXT, price TEXT, description TEXT, link TEXT, site TEXT, updated TEXT, other_signs TEXT, update_type TEXT, old_price TEXT)")
 	statement.Exec()
 
-	ticker := time.NewTicker(60 * 60 * time.Second)
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+
+	ticker := time.NewTicker(5 * 60 * time.Second)
 
 	for ; true; <-ticker.C {
 
 		datetime := time.Now().Format(time.RFC3339)
 		fmt.Println("ajsaleParser " + datetime)
 
-		ctx, cancel := chromedp.NewContext(context.Background())
-		defer cancel()
-
 		var res string
 
 		err := chromedp.Run(ctx,
 			chromedp.Navigate(`https://ajsale.ru`),
-			chromedp.WaitReady(".row"),
+			chromedp.WaitReady(".catalog__item"),
 			chromedp.ActionFunc(func(ctx context.Context) error {
 				node, err := dom.GetDocument().Do(ctx)
 				if err != nil {
@@ -347,13 +341,13 @@ func ajsaleParser() {
 		statement, _ = database.Prepare("DELETE FROM prices WHERE site='ajsale.ru'")
 		statement.Exec()
 
-		reProduct := regexp.MustCompile(`(?im)<div class="col-sm-12 col-md-3"(.*?)<h3>(.*?)</h3>(.*?)<p class="caption__desc">(.*?)</p><p class="caption__price"><span>(.*?)</span>(.*?)Оформить заявку`)
+		reProduct := regexp.MustCompile(`(?im)<div class="catalog__item"(.*?)<h3>(.*?)<\/h3>(.*?)<p class="caption__desc">(.*?)<\/p>(.*?)<p class="caption__price"><span>(.*?)<\/span>(.*?)Оформить заявку`)
 		products := reProduct.FindAllSubmatch([]byte(res), -1)
 
 		for _, product := range products {
 			statement, _ = database.Prepare("INSERT INTO prices (title, price, category, description, site, updated) VALUES (?, ?, ?, ?, ?, ?)")
 			datetime := time.Now().Format(time.RFC3339)
-			price := bytes.ReplaceAll(product[5], []byte("&nbsp;"), []byte(""))
+			price := bytes.ReplaceAll(product[6], []byte("&nbsp;"), []byte(""))
 			price = bytes.ReplaceAll(price, []byte("₽"), []byte(""))
 			price = bytes.TrimSpace(price)
 			title := bytes.TrimSpace(product[2])
