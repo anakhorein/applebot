@@ -22,7 +22,7 @@ func main() {
 	go ajsaleParser()
 	go ajParser()
 
-	bot, err := tgbotapi.NewBotAPI("")
+	bot, err := tgbotapi.NewBotAPI("489336826:AAFff3rB17QW4_ICh3HtOd6hkoVa-zfzxMo")
 	if err != nil {
 		log.Panic(err)
 	}
